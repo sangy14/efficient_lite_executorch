@@ -389,7 +389,7 @@ def load_efficientdet_model(model_name="tf_efficientdet_lite4", pretrained=True)
     if not EFFDET_AVAILABLE:
         raise RuntimeError("effdet is required. Install with: pip install effdet")
     print(f"Loading {model_name} (raw backbone, no DetBenchPredict)...")
-    raw_model = create_model(model_name, pretrained=pretrained)
+    raw_model = create_model(model_name, pretrained=pretrained, image_size=(INPUT_SIZE, INPUT_SIZE))
     raw_model.eval()
     # Pre-process Conv2d and BatchNorm2d to avoid EXIR pass crashes with None
     # This fixes the 'FuseBatchNormPass' crash by ensuring bias/weight tensors
@@ -499,8 +499,14 @@ def export_all_models():
     np.random.seed(seed)
     torch.manual_seed(seed)
     
-    # We use a dummy input for FP32 export
-    example_input = (torch.randn(1, 3, INPUT_SIZE, INPUT_SIZE),)
+    print("\nPreparing calibration data...")
+    calibration_data = prepare_calibration_data(BATCH_SIZE, INPUT_SIZE)
+    if not calibration_data:
+        print("Error: No calibration data available.")
+        return {}
+
+    # We use a dummy input for 640x640 FP32 export
+    example_input = calibration_data[0]
     print(f"Example input shape: {example_input[0].shape}")
     results = {}
     
@@ -516,14 +522,14 @@ def export_all_models():
     print(f"Output shape: {test_out.shape}")
 
     # ---- FP32 Vulkan Model ----
-    print("\n[1/1] Exporting FP32 Vulkan model...")
+    print("\n[1/2] Exporting FP32 Vulkan model...")
     try:
         # Re-load to ensure clean state
         model_fp32 = load_efficientdet_model(MODEL_NAME, pretrained=True)
         with patch_batch_norm_for_fp32():
             _, fp32_file = export_and_save_model(
                 model_fp32, example_input,
-                "efficientdet_lite4_vulkan_fp32.pte",
+                "efficientdet_lite4_vulkan_fp32_640.pte",
                 "FP32 MODEL (VULKAN)",
                 batch_size=BATCH_SIZE,
             )
@@ -536,8 +542,33 @@ def export_all_models():
     except Exception as e:
         print(f"Error exporting FP32 Vulkan model: {e}")
 
-    # Note: Quantization for Vulkan in ExecuTorch typically requires 
-    # different schemes than XNNPACK. We focus on FP32 stability first.
+    # ---- INT8 Static Per-Channel Vulkan Model ----
+    print("\n[2/2] Exporting INT8 static per-channel Vulkan model...")
+    try:
+        model_q = load_efficientdet_model(MODEL_NAME, pretrained=True)
+        quantized_model = quantize_model(
+            model_q, example_input,
+            get_symmetric_quantization_config(
+                is_per_channel=True, is_dynamic=False
+            ),
+            calibration_data=calibration_data,
+        )
+        with patch_batch_norm_for_fp32():
+            _, q_file = export_and_save_model(
+                quantized_model, example_input,
+                "efficientdet_lite4_vulkan_int8_static_perchannel_640.pte",
+                "INT8 STATIC PER-CHANNEL (VULKAN)",
+                batch_size=BATCH_SIZE,
+                use_vulkan=True
+            )
+        q_size = get_file_size_mb(q_file)
+        results["vulkan_int8_perchannel"] = {
+            "filename": q_file,
+            "size_mb": q_size,
+            "quantization": "INT8 Static Per-Channel",
+        }
+    except Exception as e:
+        print(f"Error exporting INT8 per-channel Vulkan model: {e}")
 
     print("\n" + "=" * 70)
     print("VULKAN EXPORT SUMMARY")
