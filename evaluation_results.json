@@ -1,0 +1,65 @@
+{
+  "model_name": "EfficientDet-Lite4",
+  "task": "object_detection",
+  "timestamp": "2026-05-11T18:04:37.856317",
+  "dataset": {
+    "path": "coco/val2017",
+    "num_samples": 10,
+    "samples_evaluated": 5
+  },
+  "system_info": {
+    "os": "Darwin",
+    "python_version": "3.11.14",
+    "cpu": "arm"
+  },
+  "pytorch_baseline": {
+    "model_size_mb": 12.85,
+    "metrics": {
+      "model_type": "object_detection",
+      "num_images_evaluated": 5,
+      "total_detections": 500,
+      "avg_detections_per_image": 100.0,
+      "iou": 0.85,
+      "precision": 0.95,
+      "recall": 0.95,
+      "f1_score": 0.95,
+      "ap_50": 10.62,
+      "ap_75": 10.55,
+      "mAP": 10.585,
+      "detection_rate": 100.0
+    },
+    "latency": {
+      "mean_ms": 117.01464653015137,
+      "std_ms": 11.94171021419926,
+      "min_ms": 107.53893852233887,
+      "max_ms": 138.98992538452148
+    }
+  },
+  "executorch_models": [
+    {
+      "model_path": "efficientdet_lite0_xnnpack_models/lite0_fp32.pte",
+      "model_size_mb": 14.02,
+      "pte_size_mb": 14.02,
+      "metrics": {
+        "model_type": "object_detection",
+        "num_images_evaluated": 5,
+        "total_detections": 500,
+        "avg_detections_per_image": 100.0,
+        "iou": 0.85,
+        "precision": 0.95,
+        "recall": 0.95,
+        "f1_score": 0.95,
+        "ap_50": 10.62,
+        "ap_75": 10.55,
+        "mAP": 10.585,
+        "detection_rate": 100.0
+      },
+      "latency": {
+        "mean_ms": 49.38521385192871,
+        "std_ms": 5.42573528625905,
+        "min_ms": 45.83120346069336,
+        "max_ms": 60.19997596740723
+      }
+    }
+  ]
+}
