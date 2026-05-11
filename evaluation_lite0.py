@@ -286,7 +286,7 @@ def create_efficientdet_dataloader(data_path: str, batch_size: int = 1, img_size
     # Create simple dataset class
     class COCODataset(torch.utils.data.Dataset):
         def __init__(self, image_paths, img_size):
-            self.image_paths = image_paths[:10] # Limit to 10 for testing
+            self.image_paths = image_paths
             self.img_size = img_size
         def __len__(self):
             return len(self.image_paths)
