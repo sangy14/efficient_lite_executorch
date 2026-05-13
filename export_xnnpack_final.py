@@ -27,9 +27,32 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 _original_pad = torch.nn.functional.pad
 def _patched_pad(input, pad, mode='constant', value=None):
     if mode == 'constant' and value is not None and (value == float('-inf') or value == -float('inf')):
-        value = -10000.0
+        value =  -3.4028234663852886e+38
     return _original_pad(input, pad, mode=mode, value=value)
 torch.nn.functional.pad = _patched_pad
+
+# --- FIX 2: Enforce explicit output sizes in upsampling operations ---
+# Using scale_factor can lead to off-by-one rounding when quantized.
+# For a 640x640 input, the feature maps must match exact integer dimensions.
+_orig_interpolate = torch.nn.functional.interpolate
+def _patched_interpolate(input, size=None, scale_factor=None, mode='nearest', align_corners=None, recompute_scale_factor=None, **kwargs):
+    if scale_factor is not None:
+        # Determine target size based on input shape and common BiFPN scales
+        # Logic to force specific sizes for 640x640 input
+        h, w = input.shape[2], input.shape[3]
+        if h == 20: size = (40, 40)
+        elif h == 10: size = (20, 20)
+        elif h == 40: size = (80, 80)
+        elif h == 5: size = (10, 10)
+        elif h == 80: size = (160, 160)
+        
+        if size is not None:
+            # If we found a matching BiFPN level, use explicit size
+            return _orig_interpolate(input, size=size, mode=mode, align_corners=align_corners, **kwargs)
+            
+    return _orig_interpolate(input, size=size, scale_factor=scale_factor, mode=mode, 
+                            align_corners=align_corners, recompute_scale_factor=recompute_scale_factor, **kwargs)
+torch.nn.functional.interpolate = _patched_interpolate
 from executorch.exir import to_edge, to_edge_transform_and_lower
 from executorch.backends.xnnpack.recipes.xnnpack_recipe_provider import (
 XNNPACKQuantizer,
@@ -78,7 +101,7 @@ try:
         _orig_pad_same_old = padding_old.pad_same
         def _patched_pad_same_old(x, k, s, d=(1, 1), value=0):
             if value == float('-inf') or value == -float('inf'):
-                value = -10000.0
+                value = -3.4028234663852886e+38
             return _orig_pad_same_old(x, k, s, d, value=value)
         padding_old.pad_same = _patched_pad_same_old
     except ImportError:
@@ -88,8 +111,8 @@ try:
         _orig_pad_same_new = padding_new.pad_same
         def _patched_pad_same_new(x, k, s, d=(1, 1), value=0):
             if value == float('-inf') or value == -float('inf'):
-                value = -10000.0
-                return _orig_pad_same_new(x, k, s, d, value=value)
+                value = -3.4028234663852886e+38
+            return _orig_pad_same_new(x, k, s, d, value=value)
         padding_new.pad_same = _patched_pad_same_new
     except ImportError:
         pass
@@ -372,8 +395,18 @@ def quantize_model(model, example_input, quantizer_config, calibration_data=None
         # Restrict quantization specifically to the EfficientDet submodules
         # This prevents the post-processing (NMS, top-k) from being quantized,
         # which avoids Long tensor crashes and preserves bounding box accuracy.
-        for name, _ in model.model.named_children():
-            quantizer.set_module_name(f"model.{name}", quantizer_config)
+        for name, module in model.model.named_modules():
+            # --- FIX 4: Skip quantization for upsample/resample layers if needed ---
+            # Some upsample or depthwise convolution layers may misbehave under
+            # per-channel quantization, locking an incorrect shape.
+            if any(term in name.lower() for term in ["upsample", "resample"]):
+                print(f" [Info] Skipping quantization for layer: {name}")
+                continue
+            
+            # Only set quantization config for specific leaf modules to avoid 
+            # accidentally quantizing skipped submodules via their parents.
+            if isinstance(module, (torch.nn.Conv2d, torch.nn.Linear, torch.nn.AdaptiveAvgPool2d)):
+                quantizer.set_module_name(f"model.{name}", quantizer_config)
         print("Preparing quantization observers...")
         prepared_model = prepare_pt2e(gm, quantizer)
         print("Calibrating...")
@@ -394,7 +427,8 @@ def load_efficientdet_model(model_name="tf_efficientdet_lite4", pretrained=True)
     if not EFFDET_AVAILABLE:
         raise RuntimeError("effdet is required. Install with: pip install effdet")
     print(f"Loading {model_name} (raw backbone, no DetBenchPredict)...")
-    raw_model = create_model(model_name, pretrained=pretrained)
+    # --- FIX 1: Pass image_size to create_model ---
+    raw_model = create_model(model_name, pretrained=pretrained, image_size=(INPUT_SIZE, INPUT_SIZE))
     raw_model.eval()
     # Pre-process Conv2d and BatchNorm2d to avoid EXIR pass crashes with None
     # This fixes the 'FuseBatchNormPass' crash by ensuring bias/weight tensors
@@ -419,6 +453,23 @@ def load_efficientdet_model(model_name="tf_efficientdet_lite4", pretrained=True)
             if getattr(m, 'running_var', None) is None:
                 m.register_buffer('running_var', torch.ones(m.num_features,
                 dtype=torch.float32, device=device))
+    
+    # --- FIX 1: Align model configuration with the fixed 640x640 input ---
+    # EfficientDet uses an internal config.image_size to generate anchors
+    # and compute feature map sizes. We set it explicitly to (640, 640).
+    if hasattr(raw_model, 'config'):
+        try:
+            raw_model.config.image_size = (INPUT_SIZE, INPUT_SIZE)
+        except Exception:
+            # Handle read-only config (OmegaConf)
+            try:
+                from omegaconf import OmegaConf
+                OmegaConf.set_struct(raw_model.config, False)
+                raw_model.config.image_size = (INPUT_SIZE, INPUT_SIZE)
+            except Exception as e:
+                print(f" [Warning] Could not set config.image_size: {e}")
+        print(f"Set model.config.image_size to {raw_model.config.image_size}")
+    
     config = raw_model.config
     print(f" num_classes={config.num_classes}, num_levels={config.num_levels}")
     print(f" image_size={config.image_size}")
